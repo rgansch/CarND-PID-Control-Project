@@ -2,7 +2,9 @@
 #include <iostream>
 #include "json.hpp"
 #include "PID.h"
-#include <math.h>
+#include <cmath>
+#include <fstream>
+#include <chrono>
 
 // for convenience
 using json = nlohmann::json;
@@ -32,10 +34,41 @@ int main()
 {
   uWS::Hub h;
 
-  PID pid;
-  // TODO: Initialize the pid variable.
-
-  h.onMessage([&pid](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
+  // Load parameters from json file
+  std::ostringstream param_buf; 
+  std::ifstream param_file("../data/parameters.json"); 
+  param_buf << param_file.rdbuf(); 
+  auto param = json::parse(param_buf.str());
+  
+  // Initialize steering PID controller
+  PID pid_steer;
+  double init_Kp_steer = param["Steering"]["Kp"].get<double>();
+  double init_Ki_steer = param["Steering"]["Ki"].get<double>();
+  double init_Kd_steer = param["Steering"]["Kd"].get<double>();
+  pid_steer.Init(init_Kp_steer, init_Ki_steer, init_Kd_steer);
+  
+  // Initialize speed PID controller
+  PID pid_speed;
+  double init_Kp_speed = param["Speed"]["Kp"].get<double>();
+  double init_Ki_speed = param["Speed"]["Ki"].get<double>();
+  double init_Kd_speed = param["Speed"]["Kd"].get<double>();
+  pid_speed.Init(init_Kp_speed, init_Ki_speed, init_Kd_speed);
+  
+  double target_speed = param["Speed"]["Set"].get<double>();
+  
+  // Initialize data logger
+	typedef std::chrono::milliseconds ms;
+	
+  std::ofstream datfile;
+  datfile.open("../data/datalog.dat", std::ios_base::out);
+  datfile << "time\tspeed\ttarget_speed\tcte\tangle\tsteer_value\n";
+	datfile.close();
+	
+	ms tstart = std::chrono::duration_cast< ms >(std::chrono::system_clock::now().time_since_epoch());
+  
+  double steer_old = 0.;
+  
+  h.onMessage([&pid_steer, &pid_speed, &steer_old, &target_speed, &datfile, &tstart](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -50,20 +83,38 @@ int main()
           double cte = std::stod(j[1]["cte"].get<std::string>());
           double speed = std::stod(j[1]["speed"].get<std::string>());
           double angle = std::stod(j[1]["steering_angle"].get<std::string>());
-          double steer_value;
-          /*
-          * TODO: Calcuate steering value here, remember the steering value is
-          * [-1, 1].
-          * NOTE: Feel free to play around with the throttle and speed. Maybe use
-          * another PID controller to control the speed!
-          */
-          
-          // DEBUG
-          std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
+		  
+					// Steering controller
+					pid_steer.UpdateError(cte);
+					double steer_value = pid_steer.TotalError();
+					
+					// Speed controller
+					double throttle;
+					pid_speed.UpdateError(target_speed - speed);
+					throttle = pid_speed.TotalError();
+					
+					// Data logger
+					ms tnow = std::chrono::duration_cast< ms >(std::chrono::system_clock::now().time_since_epoch());
+					ms tdiff = tnow - tstart;
+					
+					std::stringstream ss;
+					ss << std::fixed << std::setprecision(3);
+					ss << tdiff.count() << '\t'
+						 << speed << '\t'
+						 << target_speed << '\t'
+						 << cte << '\t'
+						 << angle << '\t'
+						 << steer_value;
+					
+					// write data in stringstream to file
+					std::ofstream datfile;
+					datfile.open("../data/datalog.dat", std::ios_base::out | std::ios_base::app);
+					datfile << ss.rdbuf() << std::endl;
+					datfile.close(); 
 
           json msgJson;
           msgJson["steering_angle"] = steer_value;
-          msgJson["throttle"] = 0.3;
+          msgJson["throttle"] = throttle;
           auto msg = "42[\"steer\"," + msgJson.dump() + "]";
           std::cout << msg << std::endl;
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
